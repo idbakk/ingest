@@ -1,0 +1,14 @@
+{
+  "Records": [
+    {
+      "s3": {
+        "bucket": {
+          "name": "dummy-bucket"
+        },
+        "object": {
+          "key": "PRJT/VFX/DELIVERY_001/_INGEST_DONE"
+        }
+      }
+    }
+  ]
+}
