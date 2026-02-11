@@ -1,0 +1,1 @@
+{"ok": true, "validated_at": "2026-02-10T08:25:07.244778Z", "reason": "OK", "errors": [], "stats": {"object_count_including_marker": 2, "payload_file_count": 1, "max_keys_cap": 5000}, "inventory": [{"key": "TEST/2010/sample.txt", "size": 6, "etag": "\"b1946ac92492d2347c6235b4d2611184\"", "last_modified": "2026-02-10T08:23:42+00:00"}]}

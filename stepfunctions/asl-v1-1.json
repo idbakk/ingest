@@ -1,0 +1,146 @@
+{
+  "Comment": "Ingest State Machine v1.1 - adds file validation gate",
+  "StartAt": "SetNextValidating",
+  "States": {
+    "SetNextValidating": {
+      "Type": "Pass",
+      "Parameters": {
+        "policy": {
+          "state": { "next": "VALIDATING" },
+          "ruleset_version": "v1.0",
+          "job_id.$": "$.job_id",
+          "project_code.$": "$.project_code"
+        },
+        "impl": {
+          "s3": {
+            "bucket.$": "$.bucket",
+            "object_key.$": "$.object_key",
+            "ingest_folder.$": "$.ingest_folder",
+            "folder_path.$": "$.folder_path"
+          },
+          "event": {
+            "created_at.$": "$.created_at",
+            "trigger.$": "$.trigger"
+          },
+          "orchestration": {
+            "execution_id.$": "$$.Execution.Id",
+            "entered_time.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobStateValidating"
+    },
+
+    "UpdateJobStateValidating": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+      "Parameters": {
+        "job_id.$": "$.policy.job_id",
+        "new_state": "VALIDATING",
+        "project_code.$": "$.policy.project_code",
+        "trigger.$": "$.impl.event.trigger",
+        "ruleset_version.$": "$.policy.ruleset_version",
+        "execution_id.$": "$$.Execution.Id",
+        "entered_time.$": "$$.State.EnteredTime"
+      },
+      "ResultPath": "$.update_job_state_result",
+      "Next": "ValidateFiles"
+    },
+
+    "ValidateFiles": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:768979069717:function:ingest-validate-files",
+      "Parameters": {
+        "job_id.$": "$.policy.job_id",
+        "project_code.$": "$.policy.project_code",
+        "bucket.$": "$.impl.s3.bucket",
+        "folder_path.$": "$.impl.s3.folder_path",
+        "object_key.$": "$.impl.s3.object_key",
+        "ingest_folder.$": "$.impl.s3.ingest_folder",
+        "trigger.$": "$.impl.event.trigger",
+        "created_at.$": "$.impl.event.created_at"
+      },
+      "ResultPath": "$.validate_result",
+      "Next": "ValidationChoice"
+    },
+
+    "ValidationChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.validate_result.ok",
+          "BooleanEquals": true,
+          "Next": "SetNextValidated"
+        }
+      ],
+      "Default": "SetNextFailedValidation"
+    },
+
+    "SetNextValidated": {
+      "Type": "Pass",
+      "Parameters": {
+        "policy": {
+          "state": { "next": "VALIDATED" },
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "job_id.$": "$.policy.job_id",
+          "project_code.$": "$.policy.project_code"
+        },
+        "impl.$": "$.impl",
+        "validate_result.$": "$.validate_result"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobStateValidated"
+    },
+
+    "UpdateJobStateValidated": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+      "Parameters": {
+        "job_id.$": "$.policy.job_id",
+        "new_state": "VALIDATED",
+        "project_code.$": "$.policy.project_code",
+        "trigger.$": "$.impl.event.trigger",
+        "ruleset_version.$": "$.policy.ruleset_version",
+        "execution_id.$": "$$.Execution.Id",
+        "entered_time.$": "$$.State.EnteredTime"
+      },
+      "ResultPath": "$.update_job_state_validated_result",
+      "End": true
+    },
+
+    "SetNextFailedValidation": {
+      "Type": "Pass",
+      "Parameters": {
+        "policy": {
+          "state": { "next": "FAILED_VALIDATION" },
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "job_id.$": "$.policy.job_id",
+          "project_code.$": "$.policy.project_code"
+        },
+        "impl.$": "$.impl",
+        "validate_result.$": "$.validate_result"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobStateFailedValidation"
+    },
+
+    "UpdateJobStateFailedValidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+      "Parameters": {
+        "job_id.$": "$.policy.job_id",
+        "new_state": "FAILED_VALIDATION",
+        "project_code.$": "$.policy.project_code",
+        "trigger.$": "$.impl.event.trigger",
+        "ruleset_version.$": "$.policy.ruleset_version",
+        "execution_id.$": "$$.Execution.Id",
+        "entered_time.$": "$$.State.EnteredTime",
+        "validation_errors.$": "$.validate_result.errors"
+      }
+      ,
+      "ResultPath": "$.update_job_state_failed_result",
+      "End": true
+    }
+  }
+}

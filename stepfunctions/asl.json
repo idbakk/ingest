@@ -1,0 +1,89 @@
+{
+  "Comment": "AI Ingest Pipeline - ASL v1.0 (Day 13 Pass -> Task)",
+  "StartAt": "PrepareJobContext",
+  "States": {
+    "PrepareJobContext": {
+      "Type": "Pass",
+      "Parameters": {
+        "policy": {
+          "job_id.$": "$.job_id",
+          "project_code.$": "$.project_code",
+
+          "state": {
+            "next": "VALIDATING"
+          },
+
+          "ruleset_version": "v1.0"
+        },
+        "impl": {
+          "s3": {
+            "bucket.$": "$.bucket",
+            "object_key.$": "$.object_key",
+            "folder_path.$": "$.folder_path",
+            "ingest_folder.$": "$.ingest_folder"
+          },
+          "event": {
+            "trigger.$": "$.trigger",
+            "created_at.$": "$.created_at"
+          },
+          "orchestration": {
+            "execution_id.$": "$$.Execution.Id",
+            "entered_time.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobState"
+    },
+
+    "UpdateJobState": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "ingest-update-job-state",
+        "Payload": {
+          "job_id.$": "$.policy.job_id",
+          "project_code.$": "$.policy.project_code",
+          "new_state.$": "$.policy.state.next",
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "context": {
+            "trigger.$": "$.impl.event.trigger",
+            "entered_time.$": "$.impl.orchestration.entered_time",
+            "execution_id.$": "$.impl.orchestration.execution_id"
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Fail"
+        }
+      ],
+      "ResultPath": "$.update_job_state_result",
+      "Next": "Done"
+    },
+
+    "Done": {
+      "Type": "Succeed"
+    },
+
+    "Fail": {
+      "Type": "Fail",
+      "Cause": "UpdateJobState failed"
+    }
+  }
+}

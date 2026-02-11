@@ -1,0 +1,7 @@
+{
+  "job_id": "dummy",
+  "project_code": "TEST",
+  "bucket": "ingest-raw-768979069717",
+  "folder_path": "TEST/2010/",
+  "object_key": "TEST/2010/_INGEST_DONE"
+}
