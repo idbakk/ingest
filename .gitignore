@@ -1,4 +1,20 @@
-venv/
 names.md
 dist/
 docs/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Build artifacts
+**/function.zip
+**/*.zip
+
+# Logs
+*.log
