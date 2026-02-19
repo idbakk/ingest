@@ -17,3 +17,7 @@ Thumbs.db
 *.log
 **/function.zip
 docs/.names.md
+docs/.names.md
+.DS_Store
+**/function.zip
+docs/
