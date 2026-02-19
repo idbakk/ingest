@@ -16,3 +16,4 @@ Thumbs.db
 # Logs
 *.log
 **/function.zip
+docs/.names.md
