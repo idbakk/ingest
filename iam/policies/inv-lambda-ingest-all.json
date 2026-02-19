@@ -1,0 +1,15 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "InvokeIngestLambdas",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+                "arn:aws:lambda:us-east-1:768979069717:function:ingest-validate-files",
+                "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+                "arn:aws:lambda:us-east-1:768979069717:function:ingest-write-manifest"
+            ]
+        }
+    ]
+}

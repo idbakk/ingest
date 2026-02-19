@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteManifestToS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::ingest-raw-768979069717/*"
+    },
+    {
+      "Sid": "UpdateIngestJobs",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:768979069717:table/IngestJobs"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
