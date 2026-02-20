@@ -117,9 +117,14 @@ def handler(event, context):
     # Store pointer so you can find it without scanning S3
     try:
         table.update_item(
-            Key={"project_code": project_code, "job_id": job_id},
-            UpdateExpression="SET manifest_s3_uri = :u, updated_at = :t",
-            ExpressionAttributeValues={":u": manifest_s3_uri, ":t": created_at},
+            Key={"job_id": job_id},
+            UpdateExpression="SET manifest_s3_uri = :u, manifest_bucket = :b, manifest_key = :k, updated_at = :t",
+            ExpressionAttributeValues={
+                ":u": manifest_s3_uri,
+                ":b": out_bucket,
+                ":k": manifest_key,
+                ":t": created_at
+            },
         )
     except ClientError as e:
         # If the job record isn't found or table key schema differs, you’ll see it here.

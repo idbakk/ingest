@@ -1,0 +1,151 @@
+{
+  "Comment": "Ingest State Machine v1.1 - validation + manifest (extensible)",
+  "StartAt": "InitContext",
+  "States": {
+    "InitContext": {
+      "Comment": "Normalize incoming event into a stable internal context (job/policy/impl).",
+      "Type": "Pass",
+      "Parameters": {
+        "job": {
+          "job_id.$": "$.job_id",
+          "project_code.$": "$.project_code"
+        },
+        "policy": {
+          "ruleset_version": "v1.0"
+        },
+        "impl": {
+          "s3": {
+            "bucket.$": "$.bucket",
+            "object_key.$": "$.object_key",
+            "ingest_folder.$": "$.ingest_folder",
+            "folder_path.$": "$.folder_path"
+          },
+          "event": {
+            "created_at.$": "$.created_at",
+            "trigger.$": "$.trigger"
+          },
+          "orchestration": {
+            "execution_id.$": "$$.Execution.Id",
+            "entered_time.$": "$$.State.EnteredTime"
+          }
+        },
+        "results": {}
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobStateValidating"
+    },
+    "UpdateJobStateValidating": {
+      "Comment": "DynamoDB: set state = VALIDATING",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "new_state": "VALIDATING",
+          "trigger.$": "$.impl.event.trigger",
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "execution_id.$": "$.impl.orchestration.execution_id",
+          "entered_time.$": "$.impl.orchestration.entered_time"
+        }
+      },
+      "ResultPath": "$.results.update_validating",
+      "Next": "ValidateFiles"
+    },
+    "ValidateFiles": {
+      "Comment": "List S3 once, apply validation rules, build inventory + stats.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-validate-files",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "bucket.$": "$.impl.s3.bucket",
+          "folder_path.$": "$.impl.s3.folder_path",
+          "object_key.$": "$.impl.s3.object_key",
+          "ingest_folder.$": "$.impl.s3.ingest_folder",
+          "trigger.$": "$.impl.event.trigger",
+          "created_at.$": "$.impl.event.created_at",
+          "ruleset_version.$": "$.policy.ruleset_version"
+        }
+      },
+      "ResultPath": "$.results.validation",
+      "Next": "ValidationChoice"
+    },
+    "ValidationChoice": {
+      "Comment": "Proceed only if validation ok == true.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.results.validation.Payload.ok",
+          "BooleanEquals": true,
+          "Next": "UpdateJobStateValidated"
+        }
+      ],
+      "Default": "UpdateJobStateFailedValidation"
+    },
+    "UpdateJobStateValidated": {
+      "Comment": "DynamoDB: set state = VALIDATED",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "new_state": "VALIDATED",
+          "trigger.$": "$.impl.event.trigger",
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "execution_id.$": "$.impl.orchestration.execution_id",
+          "entered_time.$": "$.impl.orchestration.entered_time"
+        }
+      },
+      "ResultPath": "$.results.update_validated",
+      "Next": "WriteManifest"
+    },
+    "WriteManifest": {
+      "Comment": "Write one manifest JSON (snapshot) to S3 and store manifest_s3_uri in DynamoDB (inside Lambda).",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-write-manifest",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "policy.$": "$.policy",
+          "impl.$": "$.impl",
+          "validate_result.$": "$.results.validation.Payload"
+        }
+      },
+      "ResultPath": "$.results.manifest",
+      "Next": "Done"
+    },
+    "UpdateJobStateFailedValidation": {
+      "Comment": "DynamoDB: set state = FAILED_VALIDATION and store errors",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-update-job-state",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "new_state": "FAILED_VALIDATION",
+          "trigger.$": "$.impl.event.trigger",
+          "ruleset_version.$": "$.policy.ruleset_version",
+          "execution_id.$": "$.impl.orchestration.execution_id",
+          "entered_time.$": "$.impl.orchestration.entered_time",
+          "validation_errors.$": "$.results.validation.Payload.errors"
+        }
+      },
+      "ResultPath": "$.results.update_failed_validation",
+      "Next": "Done"
+    },
+    "Done": {
+      "Comment": "Final output keeps full context + results so future steps can be added easily.",
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}
