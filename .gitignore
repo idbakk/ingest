@@ -23,7 +23,7 @@ docs/
 docs/.names.md
 
 # Media / test assets
-video/public/
+video/
 *.mp4
 *.mov
 *.mxf
@@ -31,3 +31,7 @@ video/public/
 
 # Temp files
 temp/
+
+# Local dependency
+lambdas/ingest-checksum-verify-mhl/xxhash/
+lambdas/ingest-checksum-verify-mhl/*.dist-info/
