@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.env
 
 # OS / editor
 .DS_Store
@@ -12,12 +13,21 @@ Thumbs.db
 # Build artifacts
 **/function.zip
 **/*.zip
+*.tar
 
 # Logs
 *.log
-**/function.zip
-docs/.names.md
-docs/.names.md
-.DS_Store
-**/function.zip
+
+# Local docs / notes
 docs/
+docs/.names.md
+
+# Media / test assets
+video/public/
+*.mp4
+*.mov
+*.mxf
+*.wav
+
+# Temp files
+temp/
