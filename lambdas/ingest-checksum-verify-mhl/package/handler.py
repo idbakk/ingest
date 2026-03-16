@@ -1,6 +1,5 @@
-import os
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import boto3
 import hashlib
@@ -26,9 +25,16 @@ def load_text_from_s3(bucket: str, key: str) -> str:
     return response["Body"].read().decode("utf-8")
 
 
+def normalize_folder_path(folder_path: str) -> str:
+    if folder_path and not folder_path.endswith("/"):
+        return folder_path + "/"
+    return folder_path or ""
+
+
 def build_relative_path(full_key: str, folder_path: str) -> str:
-    if full_key.startswith(folder_path):
-        return full_key[len(folder_path):]
+    prefix = normalize_folder_path(folder_path)
+    if full_key.startswith(prefix):
+        return full_key[len(prefix):]
     return full_key
 
 
@@ -142,6 +148,18 @@ def parse_mhl_v2(root: ET.Element) -> List[Dict[str, Any]]:
     return entries
 
 
+def validate_hash_entries(entries: List[Dict[str, Any]]) -> None:
+    for idx, entry in enumerate(entries):
+        if not entry.get("path"):
+            raise ValueError(f"Invalid MHL entry at index {idx}: missing path")
+        if not entry.get("algorithm"):
+            raise ValueError(f"Invalid MHL entry at index {idx}: missing algorithm")
+        if not entry.get("hash_value"):
+            raise ValueError(f"Invalid MHL entry at index {idx}: missing hash_value")
+        if entry.get("size") is None:
+            raise ValueError(f"Invalid MHL entry at index {idx}: missing size")
+
+
 def parse_mhl_xml(xml_text: str) -> Dict[str, Any]:
     root = ET.fromstring(xml_text)
     root_name = strip_namespace(root.tag)
@@ -156,6 +174,8 @@ def parse_mhl_xml(xml_text: str) -> Dict[str, Any]:
     else:
         entries = parse_mhl_v1(root)
 
+    validate_hash_entries(entries)
+
     return {
         "mhl_version": version,
         "namespace": namespace,
@@ -165,10 +185,15 @@ def parse_mhl_xml(xml_text: str) -> Dict[str, Any]:
 
 
 def choose_mhl_key(mhl_keys: List[str]) -> str:
-    if not mhl_keys:
-        raise ValueError("No MHL key provided")
-    return sorted(mhl_keys)[0]
+    normalized = sorted([k for k in mhl_keys if k])
 
+    if not normalized:
+        raise ValueError("MHL_NOT_FOUND")
+
+    if len(normalized) > 1:
+        raise ValueError(f"AMBIGUOUS_MHL_PACKAGE: {normalized}")
+
+    return normalized[0]
 
 def create_hasher(algorithm: str):
     algo = (algorithm or "").lower()
@@ -328,6 +353,54 @@ def verify_expected_vs_actual(
         "actual_entries": actual_entries,
     }
 
+def build_verify_failure_result(
+    *,
+    reason: str,
+    job_id: str,
+    project_code: str,
+    manifest_s3_uri: str,
+    actual_entries: List[Dict[str, Any]],
+    mismatch_type: str,
+    error_message: str,
+    mhl_key: Optional[str] = None,
+    mhl_keys: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    actual_payload: Dict[str, Any] = {
+        "error": error_message,
+    }
+
+    if mhl_key is not None:
+        actual_payload["mhl_key"] = mhl_key
+
+    if mhl_keys is not None:
+        actual_payload["mhl_keys"] = mhl_keys
+
+    return {
+        "mode": "VERIFY_MHL",
+        "ok": False,
+        "reason": reason,
+        "job_id": job_id,
+        "project_code": project_code,
+        "manifest_s3_uri": manifest_s3_uri,
+        "mhl_key": mhl_key,
+        "mhl_version": None,
+        "hash_entry_count": 0,
+        "files_total": 0,
+        "files_verified": 0,
+        "files_failed": 1,
+        "files_missing": 0,
+        "mismatches": [
+            {
+                "type": mismatch_type,
+                "path": mhl_key,
+                "expected": None,
+                "actual": actual_payload,
+            }
+        ],
+        "verified_entries": [],
+        "hash_entries": [],
+        "actual_entries": actual_entries,
+    }
 
 def handler(event, context):
     job_id = event.get("job_id")
@@ -345,11 +418,60 @@ def handler(event, context):
     if not mhl_keys:
         raise ValueError("Missing required field: mhl_keys")
 
-    mhl_key = choose_mhl_key(mhl_keys)
-    xml_text = load_text_from_s3(bucket, mhl_key)
-
-    parsed = parse_mhl_xml(xml_text)
     actual_entries = build_inventory_lookup(inventory, folder_path)
+
+    try:
+        mhl_key = choose_mhl_key(mhl_keys)
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith("AMBIGUOUS_MHL_PACKAGE"):
+            return build_verify_failure_result(
+                reason="AMBIGUOUS_MHL_PACKAGE",
+                job_id=job_id,
+                project_code=project_code,
+                manifest_s3_uri=manifest_s3_uri,
+                actual_entries=actual_entries,
+                mismatch_type="AMBIGUOUS_MHL_PACKAGE",
+                error_message=msg,
+                mhl_keys=sorted([k for k in mhl_keys if k]),
+            )
+
+        return build_verify_failure_result(
+            reason="INVALID_MHL",
+            job_id=job_id,
+            project_code=project_code,
+            manifest_s3_uri=manifest_s3_uri,
+            actual_entries=actual_entries,
+            mismatch_type="INVALID_MHL",
+            error_message=msg,
+            mhl_keys=sorted([k for k in mhl_keys if k]),
+        )
+
+    try:
+        xml_text = load_text_from_s3(bucket, mhl_key)
+        parsed = parse_mhl_xml(xml_text)
+    except ET.ParseError as exc:
+        return build_verify_failure_result(
+            reason="MHL_PARSE_FAILED",
+            job_id=job_id,
+            project_code=project_code,
+            manifest_s3_uri=manifest_s3_uri,
+            actual_entries=actual_entries,
+            mismatch_type="MHL_PARSE_FAILED",
+            error_message=str(exc),
+            mhl_key=mhl_key,
+        )
+    except ValueError as exc:
+        return build_verify_failure_result(
+            reason="INVALID_MHL",
+            job_id=job_id,
+            project_code=project_code,
+            manifest_s3_uri=manifest_s3_uri,
+            actual_entries=actual_entries,
+            mismatch_type="INVALID_MHL",
+            error_message=str(exc),
+            mhl_key=mhl_key,
+        )
 
     verification = verify_expected_vs_actual(
         bucket=bucket,
