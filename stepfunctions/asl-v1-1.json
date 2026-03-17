@@ -131,7 +131,7 @@
       "Next": "UpdateJobStateDeepValidating"
     },
     "UpdateJobStateDeepValidating": {
-      "Comment": "DynamoDB: set state = DEEP_VALIDATING (start of deep checks like checksum/codec).",
+      "Comment": "DynamoDB: set state = DEEP_VALIDATING (start of deep checks-checksum/media).",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
@@ -161,7 +161,7 @@
           "project_code.$": "$.job.project_code",
           "manifest_s3_uri.$": "$.results.manifest.Payload.manifest_s3_uri",
           "inventory.$": "$.validate_result.inventory"
-         }
+        }
       },
       "ResultPath": "$.results.detect_mhl",
       "Next": "ChecksumModeChoice"
@@ -195,7 +195,7 @@
         }
       },
       "ResultPath": "$.results.checksum",
-      "Next": "UpdateJobStateDeepValidated"
+      "Next": "DeepValidateMedia"
     },
     "ChecksumBaseline": {
       "Comment": "Compute baseline checksums for delivery files when no MHL is present.",
@@ -214,7 +214,35 @@
         }
       },
       "ResultPath": "$.results.checksum",
-      "Next": "UpdateJobStateDeepValidated"   
+      "Next": "DeepValidateMedia"
+    },
+    "DeepValidateMedia": {
+      "Comment": "Run Media Classification from inventory and record media summary.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:768979069717:function:ingest-deep-validate-media",
+        "Payload": {
+          "job_id.$": "$.job.job_id",
+          "project_code.$": "$.job.project_code",
+          "bucket.$": "$.impl.s3.bucket",
+          "folder_path.$": "$.impl.s3.folder_path",
+          "manifest_s3_uri.$": "$.results.manifest.Payload.manifest_s3_uri",
+          "inventory.$": "$.validate_result.inventory"
+        }
+      },
+      "ResultPath": "$.results.media",
+      "Next": "BuildDeepValidationSummary"
+    },
+    "BuildDeepValidationSummary": {
+      "Comment": "Combine deep-validation family results into one stored summary.",
+      "Type": "Pass",
+      "Parameters": {
+        "checksum.$": "$.results.checksum.Payload",
+        "media.$": "$.results.media.Payload"
+      },
+      "ResultPath": "$.results.deep_validation_summary",
+      "Next": "UpdateJobStateDeepValidated"
     },
     "UpdateJobStateDeepValidated": {
       "Comment": "DynamoDB: set state = DEEP_VALIDATED (deep validation complete).",
@@ -231,7 +259,7 @@
           "execution_id.$": "$.impl.orchestration.execution_id",
           "entered_time.$": "$.impl.orchestration.entered_time",
           "manifest_s3_uri.$": "$.results.manifest.Payload.manifest_s3_uri",
-          "deep_validation_summary.$": "$.results.checksum.Payload"
+          "deep_validation_summary.$": "$.results.deep_validation_summary"
         }
       },
       "ResultPath": "$.results.update_deep_validated",
