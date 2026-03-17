@@ -21,6 +21,7 @@ Thumbs.db
 # Local docs / notes
 docs/
 docs/.names.md
+contract.md
 
 # Media / test assets
 video/
@@ -35,3 +36,6 @@ temp/
 # Local dependency
 lambdas/ingest-checksum-verify-mhl/xxhash/
 lambdas/ingest-checksum-verify-mhl/*.dist-info/
+
+# Copied lambda handlers
+_*_handler.py
