@@ -39,3 +39,6 @@ lambdas/ingest-checksum-verify-mhl/*.dist-info/
 
 # Copied lambda handlers
 _*_handler.py
+
+# Layer
+/bin/
