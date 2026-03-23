@@ -1,18 +1,19 @@
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
 from decimal import Decimal
+from typing import Any, Dict, List
 
 import boto3
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(os.environ.get("JOB_TABLE", "IngestJobs"))
 
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def get_nested(dct: Dict[str, Any], path: List[str], default: Any = None):
+def get_nested(dct: Dict[str, Any], path: List[str], default: Any = None) -> Any:
     cur: Any = dct
     for p in path:
         if not isinstance(cur, dict) or p not in cur:
@@ -21,7 +22,7 @@ def get_nested(dct: Dict[str, Any], path: List[str], default: Any = None):
     return cur
 
 
-def to_dynamodb_compatible(value):
+def to_dynamodb_compatible(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: to_dynamodb_compatible(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -29,6 +30,86 @@ def to_dynamodb_compatible(value):
     if isinstance(value, float):
         return Decimal(str(value))
     return value
+
+
+def compact_checksum_summary(checksum: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(checksum, dict):
+        return {}
+
+    mismatches = checksum.get("mismatches") or []
+
+    return {
+        "mode": checksum.get("mode"),
+        "ok": checksum.get("ok"),
+        "reason": checksum.get("reason"),
+        "algorithm": checksum.get("algorithm"),
+        "files_total": checksum.get("files_total"),
+        "files_verified": checksum.get("files_verified"),
+        "files_failed": checksum.get("files_failed"),
+        "files_missing": checksum.get("files_missing"),
+        "mismatch_count": len(mismatches),
+    }
+
+
+def compact_media_summary(media: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(media, dict):
+        return {}
+
+    mismatches = media.get("mismatches") or []
+    summary = media.get("summary") or {}
+
+    return {
+        "ok": media.get("ok"),
+        "reason": media.get("reason"),
+        "files_total": media.get("files_total"),
+        "files_media_candidate": media.get("files_media_candidate"),
+        "files_non_media": media.get("files_non_media"),
+        "files_ignored": media.get("files_ignored"),
+        "video_count": summary.get("video_count"),
+        "audio_count": summary.get("audio_count"),
+        "image_count": summary.get("image_count"),
+        "subtitle_count": summary.get("subtitle_count"),
+        "unknown_media_count": summary.get("unknown_media_count"),
+        "probe_attempted_count": summary.get("probe_attempted_count"),
+        "probed_count": summary.get("probed_count"),
+        "probe_failed_count": summary.get("probe_failed_count"),
+        "mismatch_count": len(mismatches),
+    }
+
+
+def compact_media_policy_summary(media_policy: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(media_policy, dict):
+        return {}
+
+    mismatches = media_policy.get("mismatches") or []
+    summary = media_policy.get("summary") or {}
+
+    return {
+        "ok": media_policy.get("ok"),
+        "reason": media_policy.get("reason"),
+        "policy_profile": media_policy.get("policy_profile"),
+        "ruleset_version": media_policy.get("ruleset_version"),
+        "files_evaluated": media_policy.get("files_evaluated"),
+        "files_with_findings": media_policy.get("files_with_findings"),
+        "finding_count": len(mismatches),
+        "unreadable_count": summary.get("unreadable_count"),
+        "missing_container_count": summary.get("missing_container_count"),
+        "video_stream_missing_count": summary.get("video_stream_missing_count"),
+        "audio_stream_missing_count": summary.get("audio_stream_missing_count"),
+        "duration_missing_or_zero_count": summary.get("duration_missing_or_zero_count"),
+        "dimension_missing_count": summary.get("dimension_missing_count"),
+    }
+
+
+def compact_deep_validation_summary(summary: Any) -> Any:
+    if not isinstance(summary, dict):
+        return summary
+
+    return {
+        "checksum": compact_checksum_summary(summary.get("checksum") or {}),
+        "media": compact_media_summary(summary.get("media") or {}),
+        "media_policy": compact_media_policy_summary(summary.get("media_policy") or {}),
+    }
 
 
 def handler(event, context):
@@ -48,10 +129,17 @@ def handler(event, context):
     entered_time = get_nested(event, ["impl", "orchestration", "entered_time"]) or event.get("entered_time")
 
     # Optional persistence fields already being sent by ASL
-    manifest_s3_uri = get_nested(event, ["results", "manifest", "Payload", "manifest_s3_uri"]) or event.get("manifest_s3_uri")
+    manifest_s3_uri = (
+        get_nested(event, ["results", "manifest", "Payload", "manifest_s3_uri"])
+        or event.get("manifest_s3_uri")
+    )
     deep_validation_summary = event.get("deep_validation_summary")
     validation_errors = event.get("validation_errors")
     policy_reason = event.get("policy_reason")
+
+    # Slim down deep validation before persisting to DynamoDB
+    if deep_validation_summary is not None:
+        deep_validation_summary = compact_deep_validation_summary(deep_validation_summary)
 
     ts = now_iso()
 
@@ -90,7 +178,7 @@ def handler(event, context):
     ]
 
     if manifest_s3_uri is not None:
-        expr_names["#muri"] = "manifest_s3_mri"
+        expr_names["#muri"] = "manifest_s3_uri"
         expr_vals[":muri"] = manifest_s3_uri
         update_parts.append("#muri = :muri")
 
@@ -100,7 +188,7 @@ def handler(event, context):
         update_parts.append("#dvs = :dvs")
 
     if validation_errors is not None:
-        expr_names["#ve"] = "validation_erros"
+        expr_names["#ve"] = "validation_errors"
         expr_vals[":ve"] = validation_errors
         update_parts.append("#ve = :ve")
 
@@ -140,4 +228,3 @@ def handler(event, context):
         response["validation_errors_persisted"] = True
 
     return response
-
