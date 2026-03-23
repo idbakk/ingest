@@ -1,8 +1,9 @@
 import os
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from decimal import Decimal
 
 import boto3
-from botocore.exceptions import ClientError
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(os.environ.get("JOB_TABLE", "IngestJobs"))
@@ -10,13 +11,25 @@ table = dynamodb.Table(os.environ.get("JOB_TABLE", "IngestJobs"))
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def get_nested(dct, path, default=None):
-    cur = dct
+
+def get_nested(dct: Dict[str, Any], path: List[str], default: Any = None):
+    cur: Any = dct
     for p in path:
         if not isinstance(cur, dict) or p not in cur:
             return default
         cur = cur[p]
     return cur
+
+
+def to_dynamodb_compatible(value):
+    if isinstance(value, dict):
+        return {k: to_dynamodb_compatible(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_dynamodb_compatible(v) for v in value]
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
+
 
 def handler(event, context):
     # Support BOTH payload styles:
@@ -34,8 +47,15 @@ def handler(event, context):
     execution_id = get_nested(event, ["impl", "orchestration", "execution_id"]) or event.get("execution_id")
     entered_time = get_nested(event, ["impl", "orchestration", "entered_time"]) or event.get("entered_time")
 
+    # Optional persistence fields already being sent by ASL
+    manifest_s3_uri = get_nested(event, ["results", "manifest", "Payload", "manifest_s3_uri"]) or event.get("manifest_s3_uri")
+    deep_validation_summary = event.get("deep_validation_summary")
+    validation_errors = event.get("validation_errors")
+    policy_reason = event.get("policy_reason")
+
     ts = now_iso()
-    history_entry = {
+
+    history_entry: Dict[str, Any] = {
         "at": ts,
         "to": new_state,
         "by": "stepfunctions",
@@ -46,16 +66,52 @@ def handler(event, context):
         "ruleset_version": ruleset_version,
     }
 
-    # Only set fields if they are not None (avoids writing NULL)
-    expr_names = {"#s": "state"}
-    expr_vals = {":s": new_state, ":u": ts, ":h": [history_entry]}
-    update_expr = "SET #s = :s, updated_at = :u ADD state_history :h"
+    if policy_reason is not None:
+        history_entry["policy_reason"] = policy_reason
 
-    # (If your state_history is a List, use list_append instead of ADD)
-    # DynamoDB lists can't use ADD; they need list_append.
-    # We'll do the safe list_append version:
-    update_expr = "SET #s = :s, updated_at = :u, state_history = list_append(if_not_exists(state_history, :empty), :h)"
-    expr_vals[":empty"] = []
+    if isinstance(validation_errors, list):
+        history_entry["validation_error_count"] = len(validation_errors)
+
+    expr_names: Dict[str, str] = {
+        "#s": "state",
+    }
+
+    expr_vals: Dict[str, Any] = {
+        ":s": new_state,
+        ":u": ts,
+        ":h": [history_entry],
+        ":empty": [],
+    }
+
+    update_parts: List[str] = [
+        "#s = :s",
+        "updated_at = :u",
+        "state_history = list_append(if_not_exists(state_history, :empty), :h)",
+    ]
+
+    if manifest_s3_uri is not None:
+        expr_names["#muri"] = "manifest_s3_mri"
+        expr_vals[":muri"] = manifest_s3_uri
+        update_parts.append("#muri = :muri")
+
+    if deep_validation_summary is not None:
+        expr_names["#dvs"] = "deep_validation_summary"
+        expr_vals[":dvs"] = deep_validation_summary
+        update_parts.append("#dvs = :dvs")
+
+    if validation_errors is not None:
+        expr_names["#ve"] = "validation_erros"
+        expr_vals[":ve"] = validation_errors
+        update_parts.append("#ve = :ve")
+
+    if policy_reason is not None:
+        expr_names["#pr"] = "policy_reason"
+        expr_vals[":pr"] = policy_reason
+        update_parts.append("#pr = :pr")
+
+    update_expr = "SET " + ", ".join(update_parts)
+
+    expr_vals = to_dynamodb_compatible(expr_vals)
 
     table.update_item(
         Key={"job_id": job_id},
@@ -64,4 +120,24 @@ def handler(event, context):
         ExpressionAttributeValues=expr_vals,
     )
 
-    return {"ok": True, "job_id": job_id, "new_state": new_state, "updated_at": ts}
+    response = {
+        "ok": True,
+        "job_id": job_id,
+        "new_state": new_state,
+        "updated_at": ts,
+    }
+
+    if manifest_s3_uri is not None:
+        response["manifest_s3_uri"] = manifest_s3_uri
+
+    if policy_reason is not None:
+        response["policy_reason"] = policy_reason
+
+    if deep_validation_summary is not None:
+        response["deep_validation_summary_persisted"] = True
+
+    if validation_errors is not None:
+        response["validation_errors_persisted"] = True
+
+    return response
+
