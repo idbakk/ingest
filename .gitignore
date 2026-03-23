@@ -42,3 +42,5 @@ _*_handler.py
 
 # Layer
 /bin/
+.DS_Store
+layers/ffprobe-layer/bin/ffprobe
