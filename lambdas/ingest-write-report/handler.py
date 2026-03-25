@@ -1,3 +1,5 @@
+# ingest-write-report handler
+
 import json
 import os
 from datetime import datetime, timezone
@@ -196,6 +198,87 @@ def compact_preflight(validate_result: Optional[Dict[str, Any]]) -> Dict[str, An
     }
 
 
+
+
+def compact_checksum_summary(checksum: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(checksum, dict):
+        return {}
+
+    mismatches = checksum.get("mismatches") or []
+
+    return {
+        "mode": checksum.get("mode"),
+        "ok": checksum.get("ok"),
+        "reason": checksum.get("reason"),
+        "algorithm": checksum.get("algorithm"),
+        "files_total": checksum.get("files_total"),
+        "files_verified": checksum.get("files_verified"),
+        "files_failed": checksum.get("files_failed"),
+        "files_missing": checksum.get("files_missing"),
+        "mismatch_count": len(mismatches),
+    }
+
+
+def compact_media_summary(media: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(media, dict):
+        return {}
+
+    mismatches = media.get("mismatches") or []
+    summary = media.get("summary") or {}
+
+    return {
+        "ok": media.get("ok"),
+        "reason": media.get("reason"),
+        "files_total": media.get("files_total"),
+        "files_media_candidate": media.get("files_media_candidate"),
+        "files_non_media": media.get("files_non_media"),
+        "files_ignored": media.get("files_ignored"),
+        "video_count": summary.get("video_count"),
+        "audio_count": summary.get("audio_count"),
+        "image_count": summary.get("image_count"),
+        "subtitle_count": summary.get("subtitle_count"),
+        "unknown_media_count": summary.get("unknown_media_count"),
+        "probe_attempted_count": summary.get("probe_attempted_count"),
+        "probed_count": summary.get("probed_count"),
+        "probe_failed_count": summary.get("probe_failed_count"),
+        "mismatch_count": len(mismatches),
+    }
+
+
+def compact_media_policy_summary(media_policy: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(media_policy, dict):
+        return {}
+
+    mismatches = media_policy.get("mismatches") or []
+    summary = media_policy.get("summary") or {}
+
+    return {
+        "ok": media_policy.get("ok"),
+        "reason": media_policy.get("reason"),
+        "policy_profile": media_policy.get("policy_profile"),
+        "ruleset_version": media_policy.get("ruleset_version"),
+        "files_evaluated": media_policy.get("files_evaluated"),
+        "files_with_findings": media_policy.get("files_with_findings"),
+        "finding_count": len(mismatches),
+        "unreadable_count": summary.get("unreadable_count"),
+        "missing_container_count": summary.get("missing_container_count"),
+        "video_stream_missing_count": summary.get("video_stream_missing_count"),
+        "audio_stream_missing_count": summary.get("audio_stream_missing_count"),
+        "duration_missing_or_zero_count": summary.get("duration_missing_or_zero_count"),
+        "dimension_missing_count": summary.get("dimension_missing_count"),
+    }
+
+
+def compact_deep_validation_summary(summary: Any) -> Any:
+    if not isinstance(summary, dict):
+        return summary
+
+    return {
+        "checksum": compact_checksum_summary(summary.get("checksum") or {}),
+        "media": compact_media_summary(summary.get("media") or {}),
+        "media_policy": compact_media_policy_summary(summary.get("media_policy") or {}),
+    }
+
 def handler(event, context):
     job_id = event.get("job_id")
     project_code = event.get("project_code")
@@ -204,7 +287,7 @@ def handler(event, context):
     ingest_folder = event.get("ingest_folder")
     manifest_s3_uri = event.get("manifest_s3_uri")
     final_state = event.get("final_state")
-    deep_validation_summary = event.get("deep_validation_summary") or {}
+    raw_deep_validation_summary = event.get("deep_validation_summary") or {}
     validate_result = event.get("validate_result")
 
     if not job_id or not project_code:
@@ -213,7 +296,7 @@ def handler(event, context):
         raise ValueError("Missing required field: manifest_s3_uri")
     if not final_state:
         raise ValueError("Missing required field: final_state")
-    if not isinstance(deep_validation_summary, dict):
+    if not isinstance(raw_deep_validation_summary, dict):
         raise ValueError("deep_validation_summary must be a dict")
 
     manifest_bucket, _ = parse_s3_uri(manifest_s3_uri)
@@ -224,7 +307,8 @@ def handler(event, context):
     job_row = to_jsonable(load_job_row(job_id))
     state_history = slim_state_history(job_row.get("state_history") or [])
 
-    findings = extract_findings(deep_validation_summary)
+    findings = extract_findings(raw_deep_validation_summary)
+    compact_deep_validation = compact_deep_validation_summary(raw_deep_validation_summary)
     quality_outcome = determine_quality_outcome(final_state, findings)
 
     generated_at = utc_now_iso()
@@ -256,13 +340,13 @@ def handler(event, context):
             "operator_summary": build_operator_summary(
                 final_state=final_state,
                 quality_outcome=quality_outcome,
-                deep_validation_summary=deep_validation_summary,
+                deep_validation_summary=compact_deep_validation,
                 findings=findings,
             ),
             "recommended_action": build_recommended_action(final_state, quality_outcome),
         },
         "preflight": compact_preflight(validate_result),
-        "deep_validation": deep_validation_summary,
+        "deep_validation": compact_deep_validation,
         "findings": findings,
         "state_history": state_history,
     }
