@@ -203,6 +203,35 @@ def safe_int(value: Any) -> Optional[int]:
         return None
 
 
+def normalize_bit_depth(value: Optional[int]) -> Optional[int]:
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def parse_rate(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            numerator_f = float(numerator)
+            denominator_f = float(denominator)
+            if denominator_f == 0:
+                return None
+            return numerator_f / denominator_f
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def download_s3_to_tmp(bucket: str, key: str) -> str:
     suffix = split_extension(key) or ".bin"
 
@@ -253,6 +282,9 @@ def build_probe_success_entry(
     format_name = format_info.get("format_name")
     container = format_name.split(",")[0] if format_name else None
 
+    video_tags = first_video.get("tags") or {}
+    format_tags = format_info.get("tags") or {}
+
     return {
         "path": classified_entry.get("path"),
         "s3_key": classified_entry.get("s3_key"),
@@ -260,13 +292,31 @@ def build_probe_success_entry(
         "readable": True,
         "unreadable": False,
         "container": container,
-        "video_codec": first_video.get("codec_name"),
-        "audio_codec": first_audio.get("codec_name"),
         "duration_seconds": safe_float(format_info.get("duration")),
+        "bit_rate": safe_int(format_info.get("bit_rate")),
+        "file_size": safe_int(format_info.get("size")) or classified_entry.get("size"),
+        "video_codec": first_video.get("codec_name"),
+        "video_profile": first_video.get("profile"),
         "width": safe_int(first_video.get("width")),
         "height": safe_int(first_video.get("height")),
+        "display_aspect_ratio": first_video.get("display_aspect_ratio"),
+        "pixel_format": first_video.get("pix_fmt"),
+        "field_order": first_video.get("field_order"),
+        "frame_rate": parse_rate(first_video.get("avg_frame_rate") or first_video.get("r_frame_rate")),
+        "timecode": video_tags.get("timecode") or format_tags.get("timecode"),
+        "audio_codec": first_audio.get("codec_name"),
+        "channels": safe_int(first_audio.get("channels")),
+        "channel_layout": first_audio.get("channel_layout"),
+        "sample_rate": safe_int(first_audio.get("sample_rate")),
+        "bit_depth": normalize_bit_depth(
+            safe_int(first_audio.get("bits_per_raw_sample"))
+            or safe_int(first_audio.get("bits_per_sample"))
+        ),
+        "color_space": first_video.get("color_space"),
+        "color_primaries": first_video.get("color_primaries"),
         "audio_stream_count": len(audio_streams),
         "probe_method": "ffprobe",
+        "probe_error": None,
     }
 
 
@@ -281,11 +331,25 @@ def build_probe_failure_entry(
         "readable": False,
         "unreadable": True,
         "container": None,
-        "video_codec": None,
-        "audio_codec": None,
         "duration_seconds": None,
+        "bit_rate": None,
+        "file_size": classified_entry.get("size"),
+        "video_codec": None,
+        "video_profile": None,
         "width": None,
         "height": None,
+        "display_aspect_ratio": None,
+        "pixel_format": None,
+        "field_order": None,
+        "frame_rate": None,
+        "timecode": None,
+        "audio_codec": None,
+        "channels": None,
+        "channel_layout": None,
+        "sample_rate": None,
+        "bit_depth": None,
+        "color_space": None,
+        "color_primaries": None,
         "audio_stream_count": None,
         "probe_method": "ffprobe",
         "probe_error": error_message,
@@ -308,6 +372,7 @@ def handler(event, context):
         raise ValueError("inventory must be a list")
 
     result = classify_inventory(inventory=inventory, folder_path=folder_path)
+    ffprobe_version = get_ffprobe_version()
 
     mismatches = list(result["mismatches"])
     summary = dict(result["summary"])
@@ -377,4 +442,5 @@ def handler(event, context):
         "classified_entries": result["classified_entries"],
         "probed_entries": probed_entries,
         "summary": summary,
+        "ffprobe_version": ffprobe_version,
     }
