@@ -1,3 +1,4 @@
+# ingest-write-ai-report handler
 import json
 import os
 from datetime import datetime, timezone
@@ -30,48 +31,85 @@ ALLOWED_ACTIONS = {
     "Investigate checksum findings",
     "Investigate media probe failure",
     "Review policy findings",
+    "Review findings and request redelivery or remediation",
+    "Investigate unreadable media and request corrected delivery",
     "AI summary unavailable",
 }
 
 SYSTEM_PROMPT = """You are an advisory ingest analyst for a media ingest pipeline.
-You are NOT the source of truth. Deterministic pipeline artifacts are the source of truth.
-Your job is to read trusted structured artifacts and produce a grounded, helpful advisory JSON report.
-Rules:
+
+Deterministic pipeline artifacts are the source of truth. You are not the source of truth.
+Your job is to read trusted structured artifacts and produce a grounded, useful advisory JSON report.
+
+Core rules:
 1. Do not invent facts.
-2. Do not contradict deterministic workflow state, outcome, or findings.
-3. Every attention point and notable asset must include short evidence strings copied or paraphrased from the provided input facts.
-4. Keep recommendations within the allowed next actions.
-5. Return JSON only. No markdown. No prose outside the JSON object.
-6. If data is limited or ambiguous, say so in the reason/evidence rather than overstating.
-7. Keep the operator brief concise and useful.
+2. Do not contradict deterministic workflow state, quality outcome, findings, or asset metadata.
+3. Use only information present in the provided artifacts.
+4. Every attention point and notable asset must include short evidence strings copied or tightly paraphrased from the provided input facts.
+5. Keep recommendations within the allowed next actions and make them consistent with the workflow outcome.
+6. If data is limited, ambiguous, or incomplete, say so in the reason or evidence instead of overstating.
+7. Keep the operator brief concise, practical, and written for a human operator.
+8. Return JSON only. No markdown. No prose outside the JSON object.
+9. Follow the requested output schema exactly.
+10. If multiple findings or notable assets describe the same underlying issue, group them into a single entry with a combined reason rather than repeating it across separate entries.
+
+Asset naming and selection rules:
+1. Always use the exact `asset_id` from the input when referring to a file.
+1-1. If a finding applies to the whole delivery rather than a specific file — such as a workflow rejection, preflight failure, or job-level metadata issue — set asset_id to null.
+2. Never refer to files by order or position such as "first asset", "second asset", or "third asset".
+3. In `notable_assets`, use the real `asset_id` and explain a concrete reason tied to deterministic evidence.
+4. If no asset is meaningfully notable, return an empty `notable_assets` list.
+5. Do not invent distinctions that are not supported by the input.
+6. Prefer asset-specific reasons over generic praise.
+
+Writing guidance:
+- Be specific, grounded, and brief.
+- Prefer clear operational language over abstract commentary.
+- For healthy deliveries, do not force warnings or notable assets.
+- For failed or rejected deliveries, make the operator brief and recommended action clearly reflect that outcome.
+
+For mixed deliveries, the operator brief must include a balanced delivery-level summary:
+- total asset count
+- how many assets are healthy/reviewable
+- how many assets have blocking findings
+- the main blocking reason for the affected assets
+
+Do not describe only the failed assets when healthy assets are also present.
+When some assets passed and some failed, state both clearly and concisely.
+
+Keep attention_points focused on items that need operator attention.
+Do not create attention points just to praise healthy assets.
 """
 
 OUTPUT_SCHEMA_HINT = {
     "ai_report_version": "v1.0",
-    "summary": {
-        "headline": "string",
-        "overall_assessment": "healthy | warning | at_risk",
-        "operator_brief": "string",
+    "ai_feedback": {
+        "section_marker": "AI_GENERATED_ADVISORY_FEEDBACK",
+        "summary": {
+            "headline": "string",
+            "overall_assessment": "healthy | warning | at_risk",
+            "operator_brief": "string",
+        },
+        "attention_points": [
+            {
+                "priority": "high | medium | low",
+                "family": "checksum | media | media_policy | workflow | delivery",
+                "asset_id": "path-or-null",
+                "title": "short string",
+                "reason": "short grounded explanation",
+                "evidence": ["short evidence string"],
+            }
+        ],
+        "notable_assets": [
+            {
+                "asset_id": "path",
+                "why_notable": "short grounded explanation",
+                "evidence": ["short evidence string"],
+            }
+        ],
+        "recommended_next_action": "Proceed with human review | Manual QC Required | Request Redelivery | Check metadata | Investigate checksum findings | Investigate media probe failure | Review policy findings | Review findings and request redelivery or remediation | Investigate unreadable media and request corrected delivery | AI summary unavailable",
+        "disclaimer": "This AI report is advisory and does not replace deterministic validation results.",
     },
-    "attention_points": [
-        {
-            "priority": "high | medium | low",
-            "family": "checksum | media | media_policy | workflow | delivery",
-            "asset_id": "path-or-null",
-            "title": "short string",
-            "reason": "short grounded explanation",
-            "evidence": ["short evidence string"],
-        }
-    ],
-    "notable_assets": [
-        {
-            "asset_id": "path",
-            "why_notable": "short grounded explanation",
-            "evidence": ["short evidence string"],
-        }
-    ],
-    "recommended_next_action": "Proceed with human review | Manual QC Required | Request Redelivery | Check metadata | Investigate checksum findings | Investigate media probe failure | Review policy findings | AI summary unavailable",
-    "disclaimer": "This AI report is advisory and does not replace deterministic validation results.",
 }
 
 table = dynamodb.Table(JOB_TABLE)
@@ -90,7 +128,7 @@ def parse_s3_uri(uri: str) -> Tuple[str, str]:
     key = parts[1] if len(parts) > 1 else ""
     return bucket, key
 
-# 2. Downloading the two report (source of truth) -> L190
+
 def load_json_from_s3_uri(uri: str) -> Dict[str, Any]:
     bucket, key = parse_s3_uri(uri)
     resp = s3.get_object(Bucket=bucket, Key=key)
@@ -186,7 +224,7 @@ def compact_asset_for_ai(asset: Dict[str, Any]) -> Dict[str, Any]:
         "findings": findings,
     }
 
-# 3. Selection phase : Curating the input
+
 def build_ai_input(report: Dict[str, Any], asset_report: Dict[str, Any]) -> Dict[str, Any]:
     assets = asset_report.get("assets") or []
     findings_assets = [a for a in assets if asset_has_findings(a)]
@@ -287,16 +325,76 @@ def try_parse_json(text: str) -> Dict[str, Any]:
         raise
 
 
-def normalize_ai_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def choose_recommended_action(final_state: Optional[str], quality_outcome: Optional[str], attention_points: List[Dict[str, Any]]) -> str:
+    families = {item.get("family") for item in attention_points if isinstance(item, dict)}
+
+    if final_state == "REJECTED_POLICY" or quality_outcome == "FAIL":
+        if "media" in families or "media_policy" in families:
+            return "Investigate unreadable media and request corrected delivery"
+        if "checksum" in families:
+            return "Review findings and request redelivery or remediation"
+        return "Review findings and request redelivery or remediation"
+
+    if attention_points:
+        if "checksum" in families:
+            return "Investigate checksum findings"
+        if "media" in families:
+            return "Investigate media probe failure"
+        if "media_policy" in families:
+            return "Review policy findings"
+        return "Manual QC Required"
+
+    return "Proceed with human review"
+
+
+def choose_operator_brief(
+    headline: Optional[str],
+    operator_brief: Optional[str],
+    final_state: Optional[str],
+    quality_outcome: Optional[str],
+    attention_points: List[Dict[str, Any]],
+) -> str:
+    brief = (operator_brief or "").strip()
+    families = {item.get("family") for item in attention_points if isinstance(item, dict)}
+
+    if final_state == "REJECTED_POLICY" or quality_outcome == "FAIL":
+        if "media" in families or "media_policy" in families:
+            return "The delivery was rejected by policy due to unreadable media and probe failure."
+        if "checksum" in families:
+            return "The delivery was rejected after deterministic validation findings were recorded."
+        return "The delivery was rejected after deterministic validation findings were recorded."
+
+    if brief:
+        lowered = brief.lower()
+        if "pipeline has failed" in lowered:
+            return "The delivery has validation findings and requires operator attention."
+        return brief
+
+    if headline:
+        return headline
+
+    return "AI advisory generated from deterministic ingest artifacts."
+
+
+def normalize_ai_report_payload(
+    payload: Dict[str, Any],
+    final_state: Optional[str] = None,
+    quality_outcome: Optional[str] = None,
+) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("AI payload must be a JSON object")
 
-    summary = payload.get("summary") or {}
+    # Accept either:
+    # 1) legacy payload with summary/attention_points at top level
+    # 2) new payload already wrapped in ai_feedback
+    ai_feedback = payload.get("ai_feedback") if isinstance(payload.get("ai_feedback"), dict) else payload
+
+    summary = ai_feedback.get("summary") or {}
     overall_assessment = summary.get("overall_assessment")
     if overall_assessment not in ALLOWED_ASSESSMENTS:
-        summary["overall_assessment"] = "warning"
+        overall_assessment = "warning"
 
-    attention_points = payload.get("attention_points") or []
+    attention_points = ai_feedback.get("attention_points") or []
     normalized_attention: List[Dict[str, Any]] = []
     for item in attention_points[:10]:
         if not isinstance(item, dict):
@@ -315,7 +413,7 @@ def normalize_ai_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    notable_assets = payload.get("notable_assets") or []
+    notable_assets = ai_feedback.get("notable_assets") or []
     normalized_notable: List[Dict[str, Any]] = []
     for item in notable_assets[:10]:
         if not isinstance(item, dict):
@@ -328,26 +426,47 @@ def normalize_ai_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    action = payload.get("recommended_next_action")
-    if action not in ALLOWED_ACTIONS:
-        action = "Proceed with human review"
+    headline = summary.get("headline")
+    operator_brief = choose_operator_brief(
+        headline=headline,
+        operator_brief=summary.get("operator_brief"),
+        final_state=final_state,
+        quality_outcome=quality_outcome,
+        attention_points=normalized_attention,
+    )
 
-    disclaimer = payload.get("disclaimer") or "This AI report is advisory and does not replace deterministic validation results."
+    action = ai_feedback.get("recommended_next_action")
+    if action not in ALLOWED_ACTIONS:
+        action = choose_recommended_action(
+            final_state=final_state,
+            quality_outcome=quality_outcome,
+            attention_points=normalized_attention,
+        )
+
+    disclaimer = (
+        ai_feedback.get("disclaimer")
+        or "This AI report is advisory and does not replace deterministic validation results."
+    )
 
     normalized = {
-        "summary": {
-            "headline": summary.get("headline"),
-            "overall_assessment": summary.get("overall_assessment"),
-            "operator_brief": summary.get("operator_brief"),
-        },
-        "attention_points": normalized_attention,
-        "notable_assets": normalized_notable,
-        "recommended_next_action": action,
-        "disclaimer": disclaimer,
+        "ai_feedback": {
+            "section_marker": "AI_GENERATED_ADVISORY_FEEDBACK",
+            "summary": {
+                "headline": headline,
+                "overall_assessment": overall_assessment,
+                "operator_brief": operator_brief,
+            },
+            "attention_points": normalized_attention,
+            "notable_assets": normalized_notable,
+            "recommended_next_action": action,
+            "disclaimer": disclaimer,
+        }
     }
 
-    # Minimal required field presence.
-    if not normalized["summary"]["headline"] or not normalized["summary"]["operator_brief"]:
+    if (
+        not normalized["ai_feedback"]["summary"]["headline"]
+        or not normalized["ai_feedback"]["summary"]["operator_brief"]
+    ):
         raise ValueError("AI payload missing required summary fields")
 
     return normalized
@@ -416,24 +535,27 @@ def build_fallback_report(
             "final_state": workflow.get("final_state"),
             "quality_outcome": workflow.get("quality_outcome") or (report.get("outcome") or {}).get("quality_outcome"),
         },
-        "summary": {
-            "headline": "AI advisory unavailable",
-            "overall_assessment": "warning",
-            "operator_brief": "The deterministic ingest artifacts were written successfully, but the AI advisory report could not be generated.",
+        "ai_feedback": {
+            "section_marker": "AI_GENERATED_ADVISORY_FEEDBACK",
+            "summary": {
+                "headline": "AI advisory unavailable",
+                "overall_assessment": "warning",
+                "operator_brief": "The deterministic ingest artifacts were written successfully, but the AI advisory report could not be generated.",
+            },
+            "attention_points": [
+                {
+                    "priority": "low",
+                    "family": "workflow",
+                    "asset_id": None,
+                    "title": "AI report unavailable",
+                    "reason": reason,
+                    "evidence": [reason],
+                }
+            ],
+            "notable_assets": [],
+            "recommended_next_action": "AI summary unavailable",
+            "disclaimer": "This AI report is advisory and does not replace deterministic validation results.",
         },
-        "attention_points": [
-            {
-                "priority": "low",
-                "family": "workflow",
-                "asset_id": None,
-                "title": "AI report unavailable",
-                "reason": reason,
-                "evidence": [reason],
-            }
-        ],
-        "notable_assets": [],
-        "recommended_next_action": "AI summary unavailable",
-        "disclaimer": "This AI report is advisory and does not replace deterministic validation results.",
     }
 
 
@@ -468,11 +590,7 @@ def build_success_report(
             "final_state": workflow.get("final_state"),
             "quality_outcome": workflow.get("quality_outcome") or (report.get("outcome") or {}).get("quality_outcome"),
         },
-        "summary": normalized_payload["summary"],
-        "attention_points": normalized_payload["attention_points"],
-        "notable_assets": normalized_payload["notable_assets"],
-        "recommended_next_action": normalized_payload["recommended_next_action"],
-        "disclaimer": normalized_payload["disclaimer"],
+        "ai_feedback": normalized_payload["ai_feedback"],
         "input_summary": {
             "total_assets": (ai_input.get("asset_counts") or {}).get("total_assets"),
             "selected_assets": (ai_input.get("asset_counts") or {}).get("selected_assets"),
@@ -480,7 +598,7 @@ def build_success_report(
         },
     }
 
-# 1. Beginning - getting the s3 address and two reports (source of truth) -> L94
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     job_id = event.get("job_id")
     project_code = event.get("project_code")
@@ -518,7 +636,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         user_prompt = build_user_prompt(ai_input)
         raw_payload, _raw_resp = invoke_bedrock_json(BEDROCK_MODEL_ID, user_prompt)
-        normalized_payload = normalize_ai_report_payload(raw_payload)
+        normalized_payload = normalize_ai_report_payload(
+            raw_payload,
+            final_state=(report.get("workflow") or {}).get("final_state"),
+            quality_outcome=((report.get("workflow") or {}).get("quality_outcome") or (report.get("outcome") or {}).get("quality_outcome")),
+        )
         ai_report = build_success_report(
             generated_at=generated_at,
             model_id=BEDROCK_MODEL_ID,
