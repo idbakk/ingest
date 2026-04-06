@@ -19,7 +19,7 @@ Thumbs.db
 *.log
 
 # Local docs / notes
-docs/
+docs/_*
 docs/.names.md
 contract.md
 

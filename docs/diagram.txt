@@ -1,0 +1,61 @@
+S3 delivery folder
+s3://ingest-raw/<project_code>/<asset_set>/
+        +
+    _INGEST_DONE
+        |
+        v
+Ingest Starter Lambda
+- parse folder scope
+- create job record (idempotent)
+- start Step Functions
+        |
+        v
+Step Functions v1.1
+        |
+        v
+Update job state = VALIDATING
+        |
+        v
+Preflight Validation
+- list S3 objects
+- exclude _INGEST_DONE
+- basic sanity checks
+- build deterministic inventory
+        |
+        +---- if validation fails ----> FAILED_VALIDATION -> Done
+        |
+        v
+Update job state = PREFLIGHT_VALIDATED
+        |
+        v
+Normalize validation result
+        |
+        v
+Write Manifest
+- write manifest JSON to S3
+- store manifest_s3_uri in DynamoDB
+        |
+        v
+Update job state = DEEP_VALIDATING
+        |
+        v
+Detect MHL Presence
+        |
+        +---- if .mhl present ----> ChecksumVerifyMhl
+        |                          - verify against ASC MHL
+        |
+        +---- if no .mhl ---------> ChecksumBaselineStub
+                                   - baseline/skip placeholder for now
+        |
+        v
+Update job state = DEEP_VALIDATED
+- store deep_validation_summary
+        |
+        v
+Done
+
+(Processing phase later)
+- codec/container checks
+- media rules
+- metadata extraction
+- transcoding / downstream routing
