@@ -9,7 +9,6 @@
 ## 1) What was completed today
 
 Checked and validated:
-
 - report-content slimming pass completed
 - `deep_validation` report section converted to compact operator-readable summary form
 - clean-case report generation validated end to end
@@ -17,8 +16,8 @@ Checked and validated:
 - `findings` preserved in fail case while `deep_validation` remained compact
 - bulky raw arrays removed from the report body
 
-Confirmed by live report output checks:
 
+Confirmed by live report output checks:
 - no raw checksum arrays in report
   - `verified_entries`
   - `actual_entries`
