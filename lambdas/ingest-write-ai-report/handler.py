@@ -140,6 +140,153 @@ def load_job_row(job_id: str) -> Dict[str, Any]:
     return resp.get("Item") or {}
 
 
+def clean_none_values(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy without keys whose value is None."""
+    return {k: v for k, v in value.items() if v is not None}
+
+
+def extract_preflight(validate_result: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(validate_result, dict):
+        return {"ok": None, "reason": None}
+    return {
+        "ok": validate_result.get("ok"),
+        "reason": validate_result.get("reason"),
+    }
+
+
+def extract_asset_report_findings(asset_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a compact findings list from asset_report when no deterministic report exists yet."""
+    top_findings = asset_report.get("findings")
+    if isinstance(top_findings, list):
+        return top_findings
+
+    findings: List[Dict[str, Any]] = []
+    for asset in asset_report.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = pick_asset_id(asset)
+        for finding in asset.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            item = dict(finding)
+            item.setdefault("asset_id", asset_id)
+            findings.append(item)
+    return findings
+
+
+def derive_quality_outcome(final_state: Optional[str], deep_validation: Dict[str, Any]) -> str:
+    if final_state in {"REJECTED_POLICY", "FAILED_VALIDATION", "FAILED_PROCESSING"}:
+        return "FAIL"
+
+    families = [
+        deep_validation.get("checksum") or {},
+        deep_validation.get("media") or {},
+        deep_validation.get("media_policy") or {},
+    ]
+    any_negative = any(family.get("ok") is False for family in families if isinstance(family, dict))
+
+    if any_negative:
+        return "PASS_WITH_WARNING"
+    return "PASS"
+
+
+def build_outcome(final_state: Optional[str], deep_validation: Dict[str, Any]) -> Dict[str, Any]:
+    checksum = deep_validation.get("checksum") or {}
+    media = deep_validation.get("media") or {}
+    media_policy = deep_validation.get("media_policy") or {}
+    quality_outcome = derive_quality_outcome(final_state, deep_validation)
+
+    if final_state == "REJECTED_POLICY":
+        return {
+            "quality_outcome": quality_outcome,
+            "headline": "Rejected by policy",
+            "operator_summary": (
+                "Deep validation completed and the delivery was rejected by policy. "
+                f"Checksum reason: {checksum.get('reason')}. "
+                f"Media reason: {media.get('reason')}. "
+                f"Media policy reason: {media_policy.get('reason')}."
+            ),
+            "recommended_action": "Review findings and request redelivery or remediation.",
+        }
+
+    if quality_outcome == "PASS":
+        return {
+            "quality_outcome": quality_outcome,
+            "headline": "Ready for review",
+            "operator_summary": (
+                "Preflight validation passed. Deep validation completed. "
+                "No blocking checksum, media, or media-policy findings were recorded."
+            ),
+            "recommended_action": "Review and decide downstream processing.",
+        }
+
+    return {
+        "quality_outcome": quality_outcome,
+        "headline": "Ready for review with warnings",
+        "operator_summary": (
+            "Preflight validation passed and deep validation completed, "
+            "but one or more non-blocking findings were recorded."
+        ),
+        "recommended_action": "Review findings before downstream processing.",
+    }
+
+
+def build_report_from_event(
+    event: Dict[str, Any],
+    job_row: Dict[str, Any],
+    asset_report: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create deterministic report-shaped input for the AI Lambda.
+
+    This supports the new flow:
+    asset_report.json -> ai_report.json -> ingest_report.json/html
+
+    The AI step must no longer require an already-written deterministic report artifact.
+    """
+    validate_result = event.get("validate_result") or {}
+    deep_validation = event.get("deep_validation_summary") or job_row.get("deep_validation_summary") or {}
+    final_state = event.get("final_state") or job_row.get("state")
+    project_code = event.get("project_code") or job_row.get("project_code")
+    ruleset_version = event.get("ruleset_version") or job_row.get("ruleset_version") or "v1.0"
+    trigger = event.get("trigger") or job_row.get("trigger") or "_INGEST_DONE"
+
+    job = asset_report.get("job") or {
+        "job_id": event.get("job_id") or job_row.get("job_id"),
+        "project_code": project_code,
+        "trigger": trigger,
+        "ruleset_version": ruleset_version,
+    }
+
+    preflight_ok = validate_result.get("ok")
+    preflight_state = "PREFLIGHT_VALIDATED" if preflight_ok is not False else "FAILED_VALIDATION"
+
+    report = {
+        "report_type": "DETERMINISTIC_AI_INPUT",
+        "report_version": "v1.1-ai-input",
+        "generated_at": utc_now_iso(),
+        "job": job,
+        "workflow": {
+            "final_state": final_state,
+            "deep_validation_completed": bool(deep_validation),
+            "preflight_state": preflight_state,
+            "deep_validation_state": "DEEP_VALIDATED" if deep_validation else None,
+            "route_state": final_state,
+        },
+        "outcome": build_outcome(final_state, deep_validation),
+        "preflight": extract_preflight(validate_result),
+        "deep_validation": deep_validation,
+        "findings": extract_asset_report_findings(asset_report),
+        "source_artifacts": clean_none_values(
+            {
+                "manifest_s3_uri": event.get("manifest_s3_uri") or job_row.get("manifest_s3_uri"),
+                "asset_report_s3_uri": event.get("asset_report_s3_uri") or job_row.get("asset_report_s3_uri"),
+            }
+        ),
+    }
+
+    return report
+
+
 def dump_json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
@@ -511,12 +658,19 @@ def build_fallback_report(
     model_id: Optional[str],
     report: Dict[str, Any],
     asset_report: Dict[str, Any],
-    report_s3_uri: str,
+    report_s3_uri: Optional[str],
     asset_report_s3_uri: str,
     reason: str,
 ) -> Dict[str, Any]:
     job = report.get("job") or asset_report.get("job") or {}
     workflow = report.get("workflow") or asset_report.get("workflow") or {}
+    source_artifacts = clean_none_values(
+        {
+            "report_s3_uri": report_s3_uri,
+            "asset_report_s3_uri": asset_report_s3_uri,
+            "manifest_s3_uri": (report.get("source_artifacts") or {}).get("manifest_s3_uri"),
+        }
+    )
     return {
         "ai_report_version": "v1.0",
         "generated_at": generated_at,
@@ -527,10 +681,7 @@ def build_fallback_report(
             "temperature": BEDROCK_TEMPERATURE,
         },
         "job": job,
-        "source_artifacts": {
-            "report_s3_uri": report_s3_uri,
-            "asset_report_s3_uri": asset_report_s3_uri,
-        },
+        "source_artifacts": source_artifacts,
         "workflow": {
             "final_state": workflow.get("final_state"),
             "quality_outcome": workflow.get("quality_outcome") or (report.get("outcome") or {}).get("quality_outcome"),
@@ -565,13 +716,20 @@ def build_success_report(
     model_id: str,
     report: Dict[str, Any],
     asset_report: Dict[str, Any],
-    report_s3_uri: str,
+    report_s3_uri: Optional[str],
     asset_report_s3_uri: str,
     normalized_payload: Dict[str, Any],
     ai_input: Dict[str, Any],
 ) -> Dict[str, Any]:
     job = report.get("job") or asset_report.get("job") or {}
     workflow = report.get("workflow") or asset_report.get("workflow") or {}
+    source_artifacts = clean_none_values(
+        {
+            "report_s3_uri": report_s3_uri,
+            "asset_report_s3_uri": asset_report_s3_uri,
+            "manifest_s3_uri": (report.get("source_artifacts") or {}).get("manifest_s3_uri"),
+        }
+    )
     return {
         "ai_report_version": "v1.0",
         "generated_at": generated_at,
@@ -582,10 +740,7 @@ def build_success_report(
             "temperature": BEDROCK_TEMPERATURE,
         },
         "job": job,
-        "source_artifacts": {
-            "report_s3_uri": report_s3_uri,
-            "asset_report_s3_uri": asset_report_s3_uri,
-        },
+        "source_artifacts": source_artifacts,
         "workflow": {
             "final_state": workflow.get("final_state"),
             "quality_outcome": workflow.get("quality_outcome") or (report.get("outcome") or {}).get("quality_outcome"),
@@ -610,21 +765,24 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     job_row = load_job_row(job_id)
     project_code = project_code or job_row.get("project_code")
+    # Backward compatible only. New v1.1 flow does not require report_s3_uri.
     report_s3_uri = report_s3_uri or job_row.get("report_s3_uri")
     asset_report_s3_uri = asset_report_s3_uri or job_row.get("asset_report_s3_uri")
 
     if not project_code:
         raise ValueError("Missing required field: project_code")
-    if not report_s3_uri:
-        raise ValueError("Missing required field: report_s3_uri")
     if not asset_report_s3_uri:
         raise ValueError("Missing required field: asset_report_s3_uri")
 
     generated_at = utc_now_iso()
-    report = load_json_from_s3_uri(report_s3_uri)
     asset_report = load_json_from_s3_uri(asset_report_s3_uri)
 
-    out_bucket = AI_REPORT_BUCKET or parse_s3_uri(report_s3_uri)[0]
+    if report_s3_uri:
+        report = load_json_from_s3_uri(report_s3_uri)
+    else:
+        report = build_report_from_event(event, job_row, asset_report)
+
+    out_bucket = AI_REPORT_BUCKET or parse_s3_uri(asset_report_s3_uri)[0]
     ai_report_key = f"{project_code}/_ai_reports/{job_id}.json"
     ai_report_s3_uri = f"s3://{out_bucket}/{ai_report_key}"
 
